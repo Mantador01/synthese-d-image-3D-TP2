@@ -1,0 +1,26 @@
+set term pdfcairo enhanced 
+set term pdfcairo linewidth 0.5
+
+#~ set output "filtered-bench3.pdf"
+set output "bench3.pdf"
+
+set grid
+set style line 11 lc rgb '#808080' lt 1
+set border 3 back ls 11
+set tics nomirror
+#set y2tics 
+
+# parula palette
+set style line 1 lt 1  lw 1 lc rgb '#0072bd' # blue
+set style line 2 lt 1  lw 1 lc rgb '#d95319' # orange
+set style line 3 lt 1  lw 1 lc rgb '#edb120' # yellow
+set style line 4 lt 1  lw 1 lc rgb '#7e2f8e' # purple
+set style line 5 lt 1  lw 1 lc rgb '#77ac30' # green
+set style line 6 lt 1  lw 1 lc rgb '#4dbeee' # light-blue
+set style line 7 lt 1  lw 1 lc rgb '#a2142f' # red
+
+
+#~ plot [10:][0:] "./filtered-bench3.txt" u 0:1 w lines t "draw time", "" u 0:2 w lines t "discard", "" u 0:4 w lines t "cull", "" u 0:3 w lines t "rasterizer"
+plot [10:][0:] "./bench3.txt" u 0:1 w lines t "draw time", "" u 0:2 w lines t "discard", "" u 0:4 w lines t "cull", "" u 0:3 w lines t "rasterizer"
+#, "" u 0:5 w lines t "fragments" axis x1y2
+

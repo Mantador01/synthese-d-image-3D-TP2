@@ -1,0 +1,276 @@
+
+/*! \addtogroup mcdirect Monte Carlo et éclairage direct
+
+on vient de voir dans \ref mcrendu que l'on peut reformuler l'équation de rendu sur \f$ S \f$, l'aire des sources de lumières, et écrire un estimateur Monte Carlo : 
+\f[
+\begin{eqnarray*}
+    L_r(p, o) &= & L_e(p, o) + \int_{S} \frac{k}{\pi} V(p, q) L_i(p, q) \cos \theta_p \frac{\cos \theta_q}{||\vec{pq}||^2} \, dq\\
+        &\approx & L_e(p, o) + \frac{1}{N} \sum_j^N \frac{k}{\pi} V(p, q_j) L_i(p, q_j) \cos \theta_p \frac{\cos \theta_{q_j}}{||\vec{pq_j}||^2} \, \frac{1}{p(q_j)}
+\end{eqnarray*}
+\f]
+
+mais, bien sur, il reste quelques détails à régler pour échantilloner  / choisir des points sur plusieurs sources de lumière...
+ 
+comme d'habitude pour estimer cette intégrale, cf \ref mc,  il faut définir une densité de proba \f$ p(q) \f$ et générer des points selon cette densité...
+
+_que peut-on faire ?_ on va commencer par le plus direct : choisir une source parmi les \f$ n \f$ sources existantes puis un point sur la source sélectionnée. 
+la densité de proba est le produit des 2 : 
+\f[
+    p(q) = \frac{1}{n} \frac{1}{aire}
+\f]
+
+ie on choisit d'abord une source uniformément parmi les \f$ n \f$ avec une variable aléatoire discrète, puis un point sur la source sélectionnée avec une variable 
+aléatoire continue.
+
+le code est direct, on suppose que l'on a décrit chaque source, des carrés, par un point et 2 aretes :
+\code
+    struct Source { Point a; Vector e1; Vector e2; Color emission; float area; };
+    std::vector<Source> sources= { ... };   // n sources de lumiere
+\endcode
+
+et il ne reste plus qu'à sélectionner une source et un point en utilisant 3 nombres aléatoires uniformes entre 0 et 1, comme les autres fois :
+\code    
+    // selectionne une source
+    int s= uniform( rng ) * sources.size()   // uniforme entre 0 et n
+    const Source& source= sources[s];
+    
+    // selectionne un point sur la source
+    float u2= uniform( rng );
+    float u3= uniform( rng );
+    
+    // place le point dans la source
+    Point q= source.a + source.e1 * u2 + source.e2 * u3;
+    
+    // evalue la densite de proba
+    float pdf= 1 / float(sources.size()) * 1 / source.area;
+\endcode
+
+et voila, sur une scène avec plusieurs sources de lumières : 
+<center> <IMG SRC="mcdirect_scene.png" width="100%"> </center>
+
+pour \f$ N = 16, 64 \f$ :
+<center>
+    <table style="width=100%;border=0px">
+        <tr><td><IMG SRC="mcdirect_n-016.png" width="100%"> <td><IMG SRC="mcdirect_n-064.png" width="100%"></tr>
+    </table>
+</center>
+
+argh ! mais pourquoi la partie droite de l'image est toute moche ?
+
+il suffit de regarder ou se trouvent les sources de lumière et comment sont distribués les points \f$ q \f$ que l'on vient de construire pour comprendre le problème.
+il y a 2 panneaux lumineux qui éclairent la scène, mais celui de gauche est découpé en 100 petits panneaux. il y a 101 sources de lumière au total...
+<center> <IMG SRC="mcdirect_sources.png" width="100%"> </center>
+
+et en observant comment sont distribués les points sur les sources (les points en rouge dans les vignettes), on se rend vite compte que presque tous les points sont 
+choisis sur les 100 petits panneaux. ce qui n'est pas très surprenant finalement...
+<center>
+    <table style="width=100%;border=0px">
+        <tr><td><IMG SRC="mcdirect_Le-01.png" width="100%"> <td><IMG SRC="mcdirect_Le-02.png" width="100%"></tr>
+    </table>
+</center>
+
+c'est exactement ce qu'il faut faire dans la partie gauche de l'image, quand les points \f$ p \f$ sont proches des petits panneaux. 
+mais pas du tout adapté pour l'autre partie de l'image lorsque les points \f$ p \f$ sont proches du grand panneau. on vient de placer tous les échantillons utilisés pour 
+estimer l'intégrale dans une petite partie du domaine qui ne contribue pas beaucoup au résultat... et on peut constater que l'estimateur ne converge pas très bien.
+
+il va falloir construire une densité de proba différente pour régler ce problème...
+
+# éclairage direct uniforme
+
+dans l'exemple précédent, on souhaiterait plutôt répartir autant de points sur les 2 panneaux, ou sélectionner un panneau / une source de lumière en fonction de son 
+aire. _comment faire ?_
+
+il va falloir construire une variable aléatoire discrète pour sélectionner une source. mais bien sur, au lieu d'utiliser une sélection uniforme, on va en profiter pour tenir 
+compte de l'aire de chaque source, pour sélectionner 2 fois plus souvent une source 2 fois plus grande... on a déjà vu un exemple simple dans \ref mc, pour sélectionner 
+un intervalle 3 fois plus souvent qu'un autre.
+
+pour construire la variable aléatoire discrète, on va imposer \f$ p(i)= \frac{aire_i}{\sum_j aire_j} \f$, ie l'aire _normalisée_ de la ième source (ne pas oublier qu'une densité de 
+proba est normalisée, donc il faut diviser l'aire de la source par la somme des aires des sources), puis construire la fonction de répartition et enfin la parcourir pour 
+sélectionner la source qui correspond à un nombre aléatoire uniforme entre 0 et 1. pour générer un point sur cette source, on utilise la même solution qu'au dessus. 
+
+au final, la densité de proba s'écrit comme un produit de 2 densités, choisir une source en fonction de son aire et choisir un point sur la source sélectionnée : 
+\f[
+    p(q) = \frac{aire}{\sum_j aire_j} \frac{1}{aire} = \frac{1}{\sum_j aire_j}
+\f]
+
+le code est sans surprise, en plusieurs étapes : d'abord sommer les aires des sources pour normaliser la densité de proba, puis construire la fonction de répartition
+(ou plutot l'histogramme cumulé vu que c'est une variable aléatoire discrète), c'est l'application directe de la définition :
+
+\code
+    std::vector<Source> sources= { ... };
+    
+    // aire totale des sources, ie normalisation de la densité de proba
+    float total= 0;
+    for(unsigned i= 0; i < sources.size(); i++)
+        total= total + sources[i].area;
+	
+	// construire la fonction de répartition
+	std::vector<float> cdf;
+	
+	float cumul= 0;
+	for(unsigned i= 0; i < sources.size(); i++)
+	{
+		cumul= cumul + sources[i].area / total;
+		cdf.push_back( cumul );
+	}
+\endcode
+
+et voila, il ne reste plus qu'à chercher l'indice de la source associée à une valeur aléatoire uniforme entre 0 et 1 :
+\code
+	// fonction de répartition
+	std::vector<float> cdf= { ... };
+	
+	// recherche 
+	float u= uniform( rng );
+	
+	int id= -1;
+	for(unsigned i= 0; i < cdf.size(); i++)
+	{
+		if(u < cdf[i])
+		{
+			id= i;
+			break;
+		}
+	}
+	assert(id != -1);	// ne doit pas arriver...
+	
+	// utiliser la source d'indice id
+\endcode
+
+et on peut faire exactement la même chose sans stocker la fonction de répartition dans un vecteur dynamique, pour gagner un peu de temps pendant le 
+calcul de l'image (ie les allocations dynamiques dans un code multi-threadé sont encore plus lentes que d'habitude, donc si on peut les éliminer du code,
+c'est mieux...)
+\code
+    std::vector<Source> sources= { ... };
+    
+    // aire totale des sources, ie normalisation de la densité de proba
+    float total= 0;
+    for(unsigned i= 0; i < sources.size(); i++)
+        total+= sources[i].area;
+    
+	int id= -1;
+    float cumul= 0;
+    float u= uniform( rng );
+    for(unsigned i= 0; i < sources.size(); i++)
+    {
+        // construit la fonction de répartition
+        cumul= cumul + sources[i].area / total;
+        
+        // parcours la fonction de répartition
+        if(u < cumul)
+        {
+			id= i;
+			break;
+        }
+    }
+	assert(id != -1);
+	
+	// on vient de choisir la source id, generer un point 
+	const Source& source= sources[id];
+	
+	float u2= uniform( rng );
+	float u3= uniform( rng );
+	
+	Point q= source.a + u2 * source.e1 + u3 * source.e2;
+	float pdf= source.area / total * 1 / source.area;
+	// ou pdf= 1 / total; par definition...
+\endcode
+
+relisez \ref mc si ce n'est pas clair, ie la fonction de répartition, le parcours... l'exemple n'utilise que 2 valeurs, c'est plus simple pour se faire une idée.
+
+__et alors ?__
+pour \f$ N = 16, 64 \f$ :
+<center>
+    <table style="width=100%;border=0px">
+        <tr><td><IMG SRC="mcdirect_cdf-016.png" width="100%"> <td><IMG SRC="mcdirect_cdf-064.png" width="100%"></tr>
+    </table>
+</center>
+
+_un peu mieux_ non ?
+
+voila ou se trouvent les points \f$ q \f$ pour un point \f$ p \f$ dans la partie gauche de l'image, ie devant les petits panneaux et pour un autre devant le grand panneau : 
+<center>
+    <table style="width=100%;border=0px">
+        <tr><td><IMG SRC="mcdirect_Le_cdf-01.png" width="100%"> <td><IMG SRC="mcdirect_Le_cdf-02.png" width="100%"></tr>
+    </table>
+</center>
+
+on a bien réussi à répartir les points sur les 2 panneaux et l'estimateur converge mieux, le bruit est mieux réparti dans l'image... 
+mais peut être que si on arrivait à placer un nombre de points en fonction de l'aire des sources vues depuis le point \f$ p \f$ (ie en fonction du nombre de pixels 
+blancs dans les vignettes) se serait encore mieux...
+
+# et si les sources sont des triangles ? 
+
+il faut trouver comment choisir uniformément un point sur l'aire d'un triangle. la construction n'est pas directe, mais il y a une solution en utilisant les coordonnées 
+barycentriques, cf \ref intrort. en construisant 3 densités de proba continues, une pour chaque coordonnée barycentrique, leurs fonctions de répartition et en les inversant 
+pour enfin générer un point dans un triangle abc avec 2 nombres aléatoires uniformes \f$ u_1, u_2\f$ entre 0 et 1 :
+
+\f[
+\begin{eqnarray*}
+    p(q)   &= & \frac{1}{aire}\\
+    \alpha &= & 1 - \sqrt{u_1}\\
+    \beta  &= & (1 - u_2) \sqrt{u_1}\\
+    \gamma &= & u_2 \sqrt{u_1}\\
+         q &= & \alpha a + \beta b + \gamma c
+\end{eqnarray*}
+\f]
+
+ce qui se code directement :
+\code
+    // triangle abc
+    Point a= { ... };
+    Point b= { ... };
+    Point c= { ... };
+    float area= length( cross(Vector(a, b), Vector(a, c)) ) / 2;
+    
+    float r1= std::sqrt(uniform( rng ));
+    float u2= uniform( rng );
+    
+    // generer les coordonnées barycentriques
+    float alpha= 1 - r1;
+    float beta= (1 - u2) * r1;
+    float gamma= u2 * r1;
+    
+    // construire le point
+    Point q= alpha*a + beta*b + gamma*c;
+    
+    // evaluer sa densite de proba
+    float pdf= 1 / area;
+\endcode
+
+
+## solution alternative
+il existe également une construction géométrique, sans doute plus simple à comprendre, cf \n
+<a href="https://drive.google.com/file/d/1J-183vt4BrN9wmqItECIjjLIKwm29qSg/view"> "A Low-Distortion Map Between Triangle and Square"</a>, E.Heitz, 2019.
+
+l'idee est différente : on génére un point dans le quadrilatère englobant le triangle, et on écrase ce quadrilatère, ie on pousse le sommet externe sur la diagonale 
+du triangle, pour le transformer en triangle. le code est assez simple aussi :
+\code
+    // triangle abc
+    Point a= { ... };
+    Point b= { ... };
+    Point c= { ... };
+    float area= length( cross(Vector(a, b), Vector(a, c)) ) / 2;
+
+	float u1= uniform( rng );
+	float u2= uniform( rng );
+	
+	float b0= u1 / 2;
+	float b1= u2 / 2;
+	float offset= b1 - b0;
+	
+	if(offset > 0)
+		b1= b1 + offset;
+	else
+		b0= b0 - offset;
+	
+	float b2= 1 - b0 - b1;
+
+	// construire le point
+	Point q= b0*a + b1*b + b2*c;
+	
+	// evaluer sa densite de proba
+	float pdf= 1 / area;
+\endcode
+
+*/

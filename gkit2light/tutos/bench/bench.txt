@@ -1,0 +1,240 @@
+prefix="bench"
+#~ prefix="radeon6650xt"
+#~ prefix="vega64"
+#~ prefix="geforce1070"
+#~ prefix="geforce1080ti"
+#~ prefix="geforce2080-linux"
+#~ prefix="geforce3080"
+#~ prefix="ryzen5500U"
+mkdir $prefix
+
+# filter size
+filter="5"
+
+# transform
+triangles="65536 262144 1048576 4194304"
+
+for n in $triangles
+do
+echo bench triangles $n
+
+bin/benchv3 --frames 1000 --rotation true --triangles $n -o $prefix/triangles-$n.txt
+bin/bench_filter --size $filter -o $prefix/filtered$filter-triangles-$n.txt -i $prefix/triangles-$n.txt
+
+done
+
+# fragments
+lights="1 8 16 32"
+
+for n in $lights
+do
+echo bench lights $n
+
+bin/benchv3 --frames 1000 --rotation true --lights $n -o $prefix/lights-$n.txt
+bin/bench_filter --size $filter -o $prefix/filtered$filter-lights-$n.txt -i $prefix/lights-$n.txt
+
+done
+
+# rasterization
+sizes="4 8 16 32 64 128 256 512 1024"
+
+for n in $sizes
+do
+echo bench grid $n
+
+bin/benchv3 --frames 2000 --rotation true --size $n -o $prefix/grid-$n.txt
+bin/bench_filter --size $filter -o $prefix/filtered$filter-grid-$n.txt -i $prefix/grid-$n.txt
+
+done
+
+# overdraw
+slices="1 4 8 16 64"
+
+for n in $slices
+do
+echo bench overdraw $n
+
+bin/benchv3 --frames 1000 --rotation true --overdraw $n -o $prefix/overdraw-$n.txt
+bin/bench_filter --size $filter -o $prefix/filtered$filter-overdraw-$n.txt -i $prefix/overdraw-$n.txt
+
+done
+
+## cpu
+#~ bin/bench_trace --frames 1000 -o $prefix/cpu-1.txt --trace bench-data/trace.txt
+#~ bin/bench_trace --frames 1000 -o $prefix/cpu2-1.txt --trace bench-data/trace2.txt
+#~ bin/bench_trace --frames 1000 -o $prefix/cpu3-1.txt --trace bench-data/trace3.txt
+bin/bench_trace --frames 1000 -o $prefix/cpu-1.txt --trace tutos/bench/trace.txt
+bin/bench_trace --frames 1000 -o $prefix/cpu2-1.txt --trace tutos/bench/trace2.txt
+bin/bench_trace --frames 1000 -o $prefix/cpu3-1.txt --trace tutos/bench/trace3.txt
+
+
+## plots
+pprefix="${prefix}/"
+#~ pprefix="${prefix}/filtered${filter}-"
+#~ pprefix="${prefix}/filtered-"
+
+# counters
+plots="1 2 3 4 5"
+for id in $plots
+do
+echo plot $id
+
+gnuplot <<EOF
+set term pdfcairo enhanced 
+set term pdfcairo linewidth 0.5
+
+set output "${pprefix}bench-$id.pdf"
+
+set datafile separator ";"
+
+set grid
+set style line 11 lc rgb '#808080' lt 1
+set border 3 back ls 11
+set tics nomirror
+
+# parula palette
+set style line 1 lt 1  lw 1 lc rgb '#0072bd' # blue
+set style line 2 lt 1  lw 1 lc rgb '#d95319' # orange
+set style line 3 lt 1  lw 1 lc rgb '#edb120' # yellow
+set style line 4 lt 1  lw 1 lc rgb '#7e2f8e' # purple
+set style line 5 lt 1  lw 1 lc rgb '#77ac30' # green
+set style line 6 lt 1  lw 1 lc rgb '#4dbeee' # light-blue
+set style line 7 lt 1  lw 1 lc rgb '#a2142f' # red
+
+plot [10:] "${pprefix}grid-16.txt" u 0:$id w lines t "grid 16", "${pprefix}grid-64.txt" u 0:$id w lines t "grid 64", "${pprefix}grid-256.txt" u 0:$id w lines t "grid 256", "${pprefix}grid-1024.txt" u 0:$id w lines t "grid 1024"
+EOF
+
+
+gnuplot <<EOF
+set term pdfcairo enhanced 
+set term pdfcairo linewidth 0.5
+
+set output "${pprefix}bench-big-$id.pdf"
+
+set datafile separator ";"
+
+set grid
+set style line 11 lc rgb '#808080' lt 1
+set border 3 back ls 11
+set tics nomirror
+
+# parula palette
+set style line 1 lt 1  lw 1 lc rgb '#0072bd' # blue
+set style line 2 lt 1  lw 1 lc rgb '#d95319' # orange
+set style line 3 lt 1  lw 1 lc rgb '#edb120' # yellow
+set style line 4 lt 1  lw 1 lc rgb '#7e2f8e' # purple
+set style line 5 lt 1  lw 1 lc rgb '#77ac30' # green
+set style line 6 lt 1  lw 1 lc rgb '#4dbeee' # light-blue
+set style line 7 lt 1  lw 1 lc rgb '#a2142f' # red
+
+plot [10:] "${pprefix}grid-4.txt" u 0:$id w lines t "grid 4", "${pprefix}grid-8.txt" u 0:$id w lines t "grid 8", "${pprefix}grid-16.txt" u 0:$id w lines t "grid 16", "${pprefix}grid-32.txt" u 0:$id w lines t "grid 32", "${pprefix}grid-64.txt" u 0:$id  w lines t "grid 64"
+EOF
+
+done
+
+# draw time
+id=1
+
+gnuplot <<EOF
+set term pdfcairo enhanced 
+set term pdfcairo linewidth 0.5
+
+set output "${pprefix}triangles-$id.pdf"
+
+set datafile separator ";"
+
+set grid
+set style line 11 lc rgb '#808080' lt 1
+set border 3 back ls 11
+set tics nomirror
+
+# parula palette
+set style line 1 lt 1  lw 1 lc rgb '#0072bd' # blue
+set style line 2 lt 1  lw 1 lc rgb '#d95319' # orange
+set style line 3 lt 1  lw 1 lc rgb '#edb120' # yellow
+set style line 4 lt 1  lw 1 lc rgb '#7e2f8e' # purple
+set style line 5 lt 1  lw 1 lc rgb '#77ac30' # green
+set style line 6 lt 1  lw 1 lc rgb '#4dbeee' # light-blue
+set style line 7 lt 1  lw 1 lc rgb '#a2142f' # red
+
+plot [10:] "${pprefix}triangles-65536.txt" u 0:$id w lines t "triangles 65536", "${pprefix}triangles-262144.txt" u 0:$id w lines t "triangles 262144", "${pprefix}triangles-1048576.txt" u 0:$id w lines t "triangles 1048576", "${pprefix}triangles-4194304.txt" u 0:$id w lines t "triangles 4194304"
+EOF
+
+
+# overdraw
+gnuplot <<EOF
+set term pdfcairo enhanced 
+set term pdfcairo linewidth 0.5
+
+set output "${pprefix}overdraw-$id.pdf"
+
+set datafile separator ";"
+
+set grid
+set style line 11 lc rgb '#808080' lt 1
+set border 3 back ls 11
+set tics nomirror
+
+# parula palette
+set style line 1 lt 1  lw 1 lc rgb '#0072bd' # blue
+set style line 2 lt 1  lw 1 lc rgb '#d95319' # orange
+set style line 3 lt 1  lw 1 lc rgb '#edb120' # yellow
+set style line 4 lt 1  lw 1 lc rgb '#7e2f8e' # purple
+set style line 5 lt 1  lw 1 lc rgb '#77ac30' # green
+set style line 6 lt 1  lw 1 lc rgb '#4dbeee' # light-blue
+set style line 7 lt 1  lw 1 lc rgb '#a2142f' # red
+
+plot [10:] "${pprefix}overdraw-1.txt" u 0:$id w lines t "overdraw 1", "${pprefix}overdraw-4.txt" u 0:$id w lines t "overdraw 4", "${pprefix}overdraw-16.txt" u 0:$id w lines t "overdraw 16", "${pprefix}overdraw-64.txt" u 0:$id w lines t "overdraw-64"
+EOF
+
+# lights
+gnuplot <<EOF
+set term pdfcairo enhanced 
+set term pdfcairo linewidth 0.5
+
+set output "${pprefix}lights-$id.pdf"
+
+set datafile separator ";"
+
+set grid
+set style line 11 lc rgb '#808080' lt 1
+set border 3 back ls 11
+set tics nomirror
+
+# parula palette
+set style line 1 lt 1  lw 1 lc rgb '#0072bd' # blue
+set style line 2 lt 1  lw 1 lc rgb '#d95319' # orange
+set style line 3 lt 1  lw 1 lc rgb '#edb120' # yellow
+set style line 4 lt 1  lw 1 lc rgb '#7e2f8e' # purple
+set style line 5 lt 1  lw 1 lc rgb '#77ac30' # green
+set style line 6 lt 1  lw 1 lc rgb '#4dbeee' # light-blue
+set style line 7 lt 1  lw 1 lc rgb '#a2142f' # red
+
+plot [10:] "${pprefix}lights-1.txt" u 0:$id w lines t "lights 1", "${pprefix}lights-8.txt" u 0:$id w lines t "lights 8", "${pprefix}lights-16.txt" u 0:$id w lines t "lights 16", "${pprefix}lights-32.txt" u 0:$id w lines t "lights 32"
+EOF
+
+# cpu
+gnuplot <<EOF
+set term pdfcairo enhanced 
+set term pdfcairo linewidth 0.5
+
+set output "${pprefix}cpu.pdf"
+
+set datafile separator ";"
+
+set grid
+set style line 11 lc rgb '#808080' lt 1
+set border 3 back ls 11
+set tics nomirror
+
+# parula palette
+set style line 1 lt 1  lw 1 lc rgb '#0072bd' # blue
+set style line 2 lt 1  lw 1 lc rgb '#d95319' # orange
+set style line 3 lt 1  lw 1 lc rgb '#edb120' # yellow
+set style line 4 lt 1  lw 1 lc rgb '#7e2f8e' # purple
+set style line 5 lt 1  lw 1 lc rgb '#77ac30' # green
+set style line 6 lt 1  lw 1 lc rgb '#4dbeee' # light-blue
+set style line 7 lt 1  lw 1 lc rgb '#a2142f' # red
+
+plot "${pprefix}cpu-1.txt" u 0:1 w lines t "cpu 1", "${pprefix}cpu2-1.txt" u 0:1 w lines t "cpu 2", "${pprefix}cpu3-1.txt" u 0:1 w lines t "cpu 3"
+EOF

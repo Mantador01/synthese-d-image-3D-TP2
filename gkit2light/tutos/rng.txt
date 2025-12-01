@@ -1,0 +1,636 @@
+
+/*! \addtogroup rng Rendu et générateurs de nombres aléatoires
+
+Les méthodes Monte Carlo utilisent beaucoup de nombres aléatoires, on a déjà vu dans \ref mcdirect_code comment utiliser les générateurs standards et une manière de les utiliser dans du code parallèlisé. 
+
+\code
+// rappel :
+#include <random>
+
+// générateur materiel
+std::random_device hwseed;
+
+// générateur de nombres aléatoires
+std::default_random_engine rng( hwseed() );
+
+// conversion en réels compris entre 0 et 1
+std::uniform_real_distribution<float> uniform(0, 1);
+
+float u1= uniform(rng);     // 1 nombre aléatoire réel entre 0 et 1
+float u2= uniform(rng);     // 1 nombre aléatoire réel entre 0 et 1
+\endcode
+    
+La solution proposée dans \ref mcdirect_code initialise un générateur différent par ligne de l'image à calculer et par thread de calcul :  
+
+\code
+#pragma omp parallel for schedule(dynamic, 1)
+    for(int py= 0; py < image.height(); py++)
+    {
+        // créer un générateur privé pour le thread qui calcule la ligne py
+        std::random_device hwseed;
+        std::default_random_engine rng( hwseed() );
+        std::uniform_real_distribution<float> uniform(0, 1);
+        
+        for(int px= 0; px < image.width(); px++)
+        {
+            for(int i= 0; i < N; i++)
+            {
+                // générer l'origine du rayon pour le pixel (px, py)
+                float x= px + uniform(rng);
+                float y= py + uniform(rng);
+                
+                ...
+            }
+        }
+    }
+\endcode
+
+_rappel :_ on ne veut surtout pas utiliser un seul générateur commun à tous les threads. ce serait une variable partagée, et il faudrait donc synchroniser son accès (avec une section critique par exemple). ca se fonctionnerait même pas très bien, en plus d'être très lent. du coup, la meilleure solution est d'initialiser un générateur par thread, au minimum. la solution la plus simple pour la boucle de calcul d'image est d'initialiser un générateur par ligne puisque openMP va créer un thread par ligne de l'image.
+
+ce qui est simple, plutôt facile à utiliser et très efficace, mais qui a un gros défaut : l'image calculée sera différente à chaque exécution du programme. c'est même pire, l'ordre d'exécution des threads va aussi modifier le résultat. si on souhaite produire la même image avec un thread ou plusieurs, il va falloir cogiter un peu plus...
+
+# 1 séquence pour toute l'image
+
+comment reproduire la même image que celle calculée par un seul thread et un seul générateur ? 
+
+il faut se rappeler qu'un générateur de nombres aléatoires génère une séquence de nombres _pseudo_ aléatoires, ie toujours les mêmes, en fonction de son initialisation.
+
+si on suppose que chaque pixel utilise \f$ n \f$ nombres aléatoires : le 1er pixel utilise les premiers nombres aléatoires d'indices \f$ [0 \, n) \f$, le pixel suivant les nombres aléatoires d'indices \f$ [n \, 2n) \f$, etc. pour produire la même image, quelque soit l'ordonnancement et le nombre de threads, il suffit d'utiliser les nombres aléatoires avec les mêmes indices pour chaque pixel de l'image... 
+
+il faut donc un moyen d'initialiser un générateur pour produire des nombres aléatoires à partir du ieme, ie pour un indice quelconque... mais les générateurs classiques de la stl ne savent pas faire ça, ie produire le ieme nombre aléatoire sans produire tous les précédents... il va falloir regarder un peu plus en détail comment fonctionnent ces générateurs. 
+
+de manière générale, on considère qu'un générateur est décrit par une fonction \f$ f(x) \f$ qui génère un nombre aléatoire à partir du précédent :
+\f[
+    x_{i}= f(x_{i-1}) = ax_{i-1} + c \mod m\\
+    \mbox{avec } x_0 = \mbox{seed}
+\f]
+
+et std::default_random_engine utilise les constantes (cf minstd_rand0) : \f$ a= 16807 \f$, \f$ m= 2^{31} -1\f$ et \f$ c= 0 \f$. on appelle ce type de générateur un LCG pour [générateur linéaire (à cause de \f$ax+c\f$) congruentiel (à cause du modulo)](https://en.wikipedia.org/wiki/Linear_congruential_generator).
+
+cette définition classique ne permet que de calculer un nouveau terme à partir du précédent, mais il est quand même possible de calculer le ieme terme en fonction du premier, cf ["Random number generation with arbitrary strides", F.B. Brown 1994](https://mcnp.lanl.gov/pdf_files/TechReport_2007_LANL_LA-UR-07-07961_Brown.pdf) !
+\f[
+    x_{i}= f(x_0)= x_0a^i + c \frac{a^i -1}{a-1} \mod m
+\f]
+
+par contre, il faut calculer \f$a^i\f$ pour générer le ieme nombre aléatoire et ça ne va pas être très rapide, même si on peut utiliser un algorithme [diviser-pour-régner](https://en.wikipedia.org/wiki/Exponentiation_by_squaring) plus rapide que calculer i fois le produit... 
+
+on peut écrire un générateur LCG avec cette nouvelle fonction, `index(i)` qui permet de générer des nombres aléatoires à partir du ieme terme. la taille des entiers ainsi que les constantes \f$ a \f$ et \f$ c \f$ sont des paramètres template, ce qui permet d'écrire les versions 32 et 64 bits de manière compacte :
+
+\code
+template< typename UInt, UInt a, UInt c, UInt m >
+struct RNGT
+{
+    RNGT( ) : x(), key() { seed(123451); }
+    RNGT( const UInt s ) : x(), key() { seed(s); }
+    void seed( const UInt s ) { key= (s << 1) | 1; x= key; }
+    
+    RNGT& index( const UInt i )
+    {
+        UInt tmul= a;
+        UInt tadd= c;
+        UInt mul= 1;
+        UInt add= 0;
+        
+        UInt delta= i;
+        while(delta)
+        {
+            if(delta & 1)
+            {
+                mul= mul * tmul;
+                add= add * tmul + tadd;
+            }
+            
+            tadd= tmul * tadd + tadd;
+            tmul= tmul * tmul;
+            delta= delta >> 1;
+        }
+        
+        x= mul * key + add;
+        return *this;
+    }
+    
+    unsigned sample( ) { x= (a*x+c) % m; return unsigned(x); }
+    
+    // c++ interface, compatible avec la stl
+    unsigned operator() ( ) { return sample(); }
+    static constexpr unsigned min( ) { return 0; }
+    static constexpr unsigned max( ) { return m-1; }
+    typedef unsigned result_type;
+    
+    // etat interne
+    UInt x;
+    UInt key;
+};
+
+typedef RNGT<uint32_t, 48271u, 0u, (1u << 31) -1> RNG0;					// minstd constants
+typedef RNGT<uint32_t, 1103515245u, 12345u, 1u << 31> RNG32;			// glibc constants
+typedef RNGT<uint64_t, 6364136223846793005lu, 1lu, 1lu << 63> RNG64;	// newlib constants
+\endcode
+
+on peut maintenant produire les N premiers nombres aléatoires dans n'importe quel ordre !! 
+\code
+RNG32 rng( 1 );
+
+// affiche les 10 premiers nombres aléatoires
+for(int i= 0; i < 10; i++) 
+{ 
+	unsigned x= rng(); 
+	printf("%u ", x); 
+}
+
+// affiche les memes nombres aléatoires dans un autre ordre...
+for(int i= 9; i >= 0; i--)
+{
+	rng.index(i);
+	
+	unsigned x= rng();
+	printf("%u ", x); 
+}
+\endcode
+
+
+il est tout à fait raisonnable d'utiliser ce générateur pour calculer une image, en utilisant `index() ` une seule fois par pixel :
+\code
+    // initialisation globale 
+    std::random_device hwseed;
+    unsigned seed= hwseed();
+
+#pragma omp parallel for schedule(dynamic, 1)
+    for(int py= 0; py < image.height(); py++)
+    {
+        for(int px= 0; px < image.width(); px++)
+        {
+			// initialise une copie du générateur pour le thread de calcul
+			RNG32 rng( seed );
+			std::uniform_real_distribution<float> uniform(0, 1);
+			
+			unsigned pi= py * image.width() + px;	// indice du pixel
+            rng.index( pi * 4*N);					// 4N nombres aleatoires par pixel
+            
+            for(int i= 0; i < N; i++)
+            {
+                // générer l'origine du rayon pour le pixel (px, py)
+                float x= px + uniform(rng);
+                float y= py + uniform(rng);
+                { ... }
+                
+                // générer une direction aléatoire 
+                float theta= uniform(rng);
+                float phi= uniform(rng);
+                { ... }
+            }
+        }
+    }
+\endcode
+
+## et la période ?
+
+dernière chose à vérifier : quelle est la période du générateur ? ie combien de nombres différents peut il générer ? RNG32 manipule des entiers 32bits, donc au mieux il pourra générer \f$ 2^{32} \f$ nombres, soit plus de 4 milliards, ça parait beaucoup, mais est-ce suffisant pour calculer une image ? 
+
+pour une petite image, 1024x1024 par exemple, il y a \f$ 2^{10} \cdot 2^{10} = 2^{20} \f$ pixels, ce qui ne laisse que \f$2^{12} = 4096\f$ nombres aléatoires pour calculer chaque pixel. pour une image "normale", 2000x1000, il y a 2 fois plus de pixels et donc environ 2000 nombres aléatoires par pixel. ce sera sans doute un peu juste lorsque l'on calcule plusieurs rebonds comme dans \ref mcindirect1...
+
+on peut utiliser le générateur 64bits avec une plus grosse période cf `RNG64` par exemple, les constantes se trouvent également sur [wikipedia](https://en.wikipedia.org/wiki/Linear_congruential_generator). 
+
+__attention :__ pour changer la _période_ du générateur, il ne suffit pas de faire les calculs sur des entiers 64bits, ie les constantes du générateur doivent être différentes aussi. l'exemple de code au dessus utilise des paramètres templates pour générer les 2 versions : ie les calculs sont exactement les mêmes, seul le type des entiers et les constantes changent.
+
+
+# 1 séquence par pixel
+
+on vient de voir une première version qui permet de rendre tout le calcul de l'image _déterministe_, ie l'image calculée ne dépend plus que de l'initialisation du générateur, cf la variable seed. mais cette solution n'est pas très statisfaisante, on aimerait quelque chose de plus souple : on n'est pas du tout sur d'utiliser le même nombre de valeurs aléatoires par pixel... 
+
+Lorsque la période du générateur est importante, on peut sélectionner l'indice de départ au hasard au lieu de le calculer en fonction de l'indice du pixel. le risque de collision est très faible (ie il y a peu de chances que 2 pixels utilisent le même point de départ et les mêmes nombres aléatoires)... et comme changer le point de départ d'un LCG revient à changer son état interne... c'est strictement équivalent à choisir une initialisation différente par pixel, au hasard. mais on a toujours besoin d'un nombre aléatoire par pixel et il faut obtenir ce nombre aléatoire en parallèle. on revient au point de départ...
+
+Les générateurs LCG que l'on vient rapidement de voir font parti des plus simples et des plus vieux. une amélioration est apparue récemment : [PCG pour permuted congruential generator](https://www.pcg-random.org/), c'est un LCG avec une permutation en plus... les nombres aléatoires sont produits en 2 étapes, un LCG classique pour commencer, suivi d'une fonction de hachage... et c'est tout ! l'utilisation de la fonction de hachage rend les résultats plus aléatoires, PCG est de meilleure qualité qu'un LCG. mais PCG introduit aussi une fonctionnalité intéressante : on peut générer plusieurs séquences de nombres aléatoires au lieu d'une seule... et on peut générer beaucoup de séquences différentes, une par pixel par exemple !
+
+_comment ça marche ?_ en reprenant la notation avec la fonction \f$ f \f$, on peut décrire PCG : 
+\f[
+    s_i= f(s_{i-1}) = as_{i-1} + c \mod m\\
+	x_i= g( s_i )\\
+    \mbox{avec } s_0 = \mbox{seed}\\
+    \mbox{avec } c = \mbox{stream}\\
+\f]
+
+la nouvelle fonction \f$ g \f$ est la fonction _résultat_ qui construit le nombre aléatoire à partir de \f$ s \f$ l'état interne du générateur, et \f$ f \f$ produit un nouvel état à partir de l'ancien, comme pour les LCG. \f$ g \f$ est une fonction de hachage qui _permute_ les bits du résultat / la représentation binaire du nombre aléatoire. 
+
+pour obtenir plusieurs séquences de nombres aléatoires, il suffit de modifier la constante \f$ c \f$. la constante \f$ a \f$ ne change pas, elle est responsable de la qualité des nombres aléatoires générés et sa valeur est le résultat d'une longue optimisation.
+
+_remarque :_ tous les LCG peuvent générer des séquences différentes en modifiant leur constante c, mais PCG a été optimisé et bien testé, cf l'annexe _tester un générateur_.
+
+PCG32 est décrit en détail sur le site  [pcg-random.org](https://www.pcg-random.org/), le code officiel est sur github, en C et C++. mais on peut écrire une version très compacte de PCG32 :
+\code
+struct PCG32 
+{
+    PCG32( ) : x(), key() { seed(0x853c49e6748fea9b, c); }
+    PCG32( const uint64_t s, const uint64_t ss= c ) : x(), key() { seed(s, ss); }
+    
+    void seed( const uint64_t s, const uint64_t ss= c )
+    {
+        key= (ss << 1) | 1;
+        
+        x= key + s;
+        sample();
+    }
+    
+    unsigned sample( )
+    {
+        // f(x), fonction de transition
+        uint64_t xx= x;
+        x= a*x + key;
+        
+        // g(x), fonction résultat 
+        uint32_t tmp= ((xx >> 18u) ^ xx) >> 27u;
+        uint32_t r= xx >> 59u;
+        return (tmp >> r) | (tmp << ((~r + 1u) & 31));
+    }
+    
+    // c++ interface
+    unsigned operator() ( ) { return sample(); }
+    static constexpr unsigned min( ) { return 0; }
+    static constexpr unsigned max( ) { return ~unsigned(0); }
+    typedef unsigned result_type;
+    
+    static constexpr uint64_t a= 0x5851f42d4c957f2d;
+    static constexpr uint64_t c= 0xda3e39cb94b95bdb;
+    
+    uint64_t x;
+    uint64_t key;
+};
+\endcode
+
+__attention :__ le générateur s'appelle pcg _32_ mais il a bien une période suffisante de \f$ 2^{64} \f$ et peut générer \f$ 2^{63} \f$ séquences différentes.
+
+il suffit maintenant d'initialiser un générateur et une séquence par pixel, et pour initialiser la séquence, on peut tout simplement utiliser l'indice du pixel !!
+\code
+    // initialisation globale 
+    std::random_device hwseed;
+    unsigned seed= hwseed();
+
+#pragma omp parallel for schedule(dynamic, 1)
+    for(int py= 0; py < image.height(); py++)
+    {
+        for(int px= 0; px < image.width(); px++)
+        {
+			// indice du pixel
+			unsigned pi= py * image.width() + px;
+			
+			// initialise une copie du générateur pour le thread de calcul
+			PCG32 rng( seed, pi );
+			std::uniform_real_distribution<float> uniform(0, 1);
+			
+            for(int i= 0; i < N; i++)
+            {
+                // générer l'origine du rayon pour le pixel (px, py)
+                float x= px + uniform(rng);
+                float y= py + uniform(rng);
+                { ... }
+                
+                // générer une direction aléatoire 
+                float theta= uniform(rng);
+                float phi= uniform(rng);
+                { ... }
+            }
+        }
+    }
+\endcode
+
+et voila !! on a même plus vraiment besoin de la fonction  `index() ` puisque chaque pixel utilise une séquence différente.
+
+
+l'histoire de la conception des générateurs de nombres aléatoires est assez longue... et les générateurs inclus dans la librairie standard ne sont pas les meilleurs, ni en terme de vitesse, ni en terme de qualité ou en fonctionnalités. 
+
+
+_pour les curieux :_ ["History of Random Number Generators"](https://www-labs.iro.umontreal.ca/~lecuyer/myftp/slides/rng-history-talk-X2017.pdf) P. L'Ecuyer  2017 slides.
+
+
+_pour les curieux :_ ["Random Numbers for Parallel Computers: Requirements and Methods, With Emphasis on GPUs"] (https://www.iro.umontreal.ca/~lecuyer/myftp/papers/parallel-rng-imacs.pdf) P. L'Ecuyer 2017
+
+
+
+# générer des nombres aléatoires
+
+Il existe de nombreuses manières de produire des nombres aléatoires, comme présenté par Pierre L'Ecuyer dans "History of Random Number Generators" (cf la présentation juste au dessus)
+
+une de mes préférée utilise uniquement une fonction de hachage. Plusieurs générateurs de ce type sont présentés dans ["Parallel random numbers: as easy as 1, 2, 3"](https://www.thesalmons.org/john/random123/) Salmon 2011. l'idée est d'utiliser les travaux sur les fonctions de chiffrement pour transformer un compteur, ie la séquence 0, 1, 2, 3, etc en séquence aléatoire ! en reprenant les fonctions \f$ f \f$ et \f$ g \f$ :
+\f[
+    s_i= f(s_{i-1}) = s_{i-1} + 1\\
+	x_i= g( s_i )
+\f]
+
+la fonction de transition \f$ f \f$ ne fait rien, c'est juste un compteur, c'est la fonction résultat \f$ g \f$ qui transforme \f$ i \f$ directement, tout le contraire d'un LCG, ou tout le travail est fait par \f$ f \f$.
+
+les fonctions de chiffrement utilisés par l'article original sont assez complexes, lentes et nécessitent de stocker plusieurs entiers. par contre, elles produisent des nombres aléatoires parfaitement uniformes ! ces fonctions sont toutes basées sur le même principe : une fonction simple appliquée plusieurs fois. 
+
+par exemple, un générateur simple comme Philox 32bits, utilise une fonction de base, un _round_ qui multiplie le compteur par une constante mais renvoie un résultat dont les bits de poids forts sont modifiés par un seed / une clé :
+\code
+    struct array2x32 { unsigned v[2]; };
+    struct array1x32 { unsigned v[1]; };
+    
+    unsigned mulhilo32( unsigned a, unsigned b, unsigned* hip )
+    {
+        uint64_t product = uint64_t(a) * uint64_t(b); 
+        *hip= unsigned(product >> 32); 
+        return unsigned(product); 
+    }
+
+    array2x32 round( array2x32 ctr, array1x32 key )
+    { 
+        uint32_t hi, lo= mulhilo32(0xd256d193, ctr.v[0], &hi); 
+        return { { hi ^ key.v[0] ^ ctr.v[1], lo } }; 
+    }
+\endcode
+
+et le générateur complet itère 10 fois cette fonction (tout en modifiant la _clé_ à chaque fois) pour produire un résultat aléatoire :
+\code
+    array1x32 bumpkey( array1x32 key ) 
+    { 
+        key.v[0] += 0x9E3779B9; 
+        return key; 
+    }
+	
+    template< int R >
+    array2x32 philox2x32( array2x32 ctr, array1x32 key )
+    { 
+        if(R>0) { ctr = round(ctr, key); } 
+        if(R>1) { key = bumpkey(key); ctr = round(ctr, key); } 
+        if(R>2) { key = bumpkey(key); ctr = round(ctr, key); } 
+        if(R>3) { key = bumpkey(key); ctr = round(ctr, key); } 
+        if(R>4) { key = bumpkey(key); ctr = round(ctr, key); } 
+        if(R>5) { key = bumpkey(key); ctr = round(ctr, key); } 
+        if(R>6) { key = bumpkey(key); ctr = round(ctr, key); } 
+        if(R>7) { key = bumpkey(key); ctr = round(ctr, key); } 
+        if(R>8) { key = bumpkey(key); ctr = round(ctr, key); } 
+        if(R>9) { key = bumpkey(key); ctr = round(ctr, key); } 
+        
+        return ctr; 
+    }
+	
+    unsigned sample( ) 
+    { 
+        n++;
+        array2x32 ctr= { { unsigned(n >> 32), unsigned(n) } }; 
+        return philox2x32<10>(ctr, key).v[0];
+    }
+	
+	// etat du generateur
+    uint64_t n;
+    array1x32 key;
+\endcode
+
+cette version de Philox passe les tests de qualité à partir de 6 itérations de la fonction de chiffrement. les auteurs préferrent utiliser 10 itérations pour éviter les surprises.
+
+## et plus simple ?
+
+on peut également construire un générateur de nombres aléatoires en utilisant des fonctions de hachage de bonne qualité, ie avec une bonne propriété d'avalanche, comme celles optimisées par le projet [hash-propector](https://github.com/skeeto/hash-prospector) sur github. cette propriété garanti que si un bit de l'entrée change, la moitiée des bits du résultat a changé aussi ! c'est ce qui permet de transformer une séquence de valeurs consécutives, 0, 1, 2, 3 etc en valeurs aléatoires, ie au moins la moitiée des bits de `hash(1)` et de `hash(2)` sont différents.
+
+ces fonctions sont construites en itérant plusieurs fois une fonction de base :
+\code
+	x ^= x >> r;
+	x *= n;
+\endcode
+
+par exemple, cette fonction avec 2 itérations :
+\code
+    unsigned hash( unsigned x )
+    {
+        x ^= x >> 16;
+        x *= 0x21f0aaad;
+        x ^= x >> 15;
+        x *= 0xd35a2d97;
+        x ^= x >> 15;
+        return x;
+    }
+\endcode
+
+permet de construire directement un générateur 32 bits basé compteur de meilleure qualité que les générateurs LCG de la librairie standard : 
+
+\code
+struct CRNG32
+{   
+    CRNG32( ) : n(), key() { seed(123451); }
+    CRNG32( const unsigned s ) : n(), key() { seed(s); }
+    void seed( const unsigned s ) { n= 0; key= (s << 1) | 1; }
+    
+    CRNG32& index( const unsigned i ) { n= i; return *this;}
+    unsigned sample( ){ return hash(++n * key); }
+    
+    // c++ interface
+    unsigned operator() ( ) { return sample(); }
+    static constexpr unsigned min( ) { return 0; }
+    static constexpr unsigned max( ) { return ~unsigned(0); }
+    typedef unsigned result_type;
+	
+    unsigned hash( unsigned x )
+    {
+        x ^= x >> 16;
+        x *= 0x21f0aaad;
+        x ^= x >> 15;
+        x *= 0xd35a2d97;
+        x ^= x >> 15;
+        return x;
+    }
+    // cf "hash prospector" https://github.com/skeeto/hash-prospector/blob/master/README.md
+    
+    unsigned n;
+    unsigned key;    
+};
+\endcode
+
+_pour les curieux :_ vérifier la qualité de ce générateur avec practrand comme expliqué dans l'annexe juste après.
+
+et la version 64bits est de bien meilleure qualité, presque aussi bonne que PCG32 :
+
+\code
+struct CRNG
+{
+    CRNG( ) : n(), key() { seed(0xc58efd154ce32f6d); }
+    CRNG( const uint64_t s ) : n(), key() { seed(s); }
+    void seed( const uint64_t s ) { n= 0; key= (s << 1) | 1; }
+    
+    CRNG& index( const uint64_t i ) { n= i; return *this;}
+    unsigned sample( ) { return hash(++n * key); }
+    
+    // c++ interface
+    unsigned operator() ( ) { return sample(); }
+    static constexpr unsigned min( ) { return 0; }
+    static constexpr unsigned max( ) { return ~unsigned(0); }
+    typedef unsigned result_type;
+    
+    unsigned hash( uint64_t v ) 
+    { 
+        v ^= (v >> 31);
+        v *= 0x7fb5d329728ea185;
+        v ^= (v >> 27);
+        v *= 0x81dadef4bc2dd44d;
+        v ^= (v >> 33);
+        return v;
+    }
+    // cf "hash prospector" https://github.com/skeeto/hash-prospector/blob/master/README.md
+    
+    uint64_t n;
+    uint64_t key;
+};
+\endcode
+
+pour calculer une image, il est direct d'utiliser la fonction `index(i)` pour chaque pixel, ou d'initialiser un générateur par pixel avec l'indice du pixel dans l'image : `CRNG rng( seed * pi )`
+
+
+# annexe : générer des nombres aléatoires dans un shader
+
+le plus direct est d'utiliser CRNG32, ie la fonction de hachage 32 bits juste au dessus, mais attention la période n'est que \f$ 2^{32} \f$.
+
+il existe aussi une version de PCG32 qui ne manipule que des entiers 32 bits, cf PCG32I, la période de chaque séquence est également \f$ 2^{32} \f$ mais il y a \f$ 2^{31} \f$ séquences différentes, ce qui suffit largement pour calculer une image en utilisant une séquence par pixel.
+
+\code
+// PCG32 avec etat interne 32 bits
+// reprise de https://github.com/imneme/pcg-c/blob/master/include/pcg_variants.h
+struct PCG32I
+{
+    PCG32I( ) : x(), key() { seed(0x46b56677u, 2891336453u); }
+    PCG32I( const unsigned s, const unsigned ss= 2891336453u ) : x(), key() { seed(s, ss); }
+    
+    void seed( const unsigned s, const unsigned ss )
+    {
+        key= (ss << 1) | 1;
+        x= s + key;
+        sample();
+    }
+    
+    unsigned sample( ) 
+    {
+        unsigned xx= x;
+        x= x * 747796405u + key;
+        
+        unsigned tmp= ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
+        return (tmp >> 22u) ^ tmp;
+    }
+    
+    // c++ interface, compatible avec la stl
+    unsigned operator() ( ) { return sample(); }
+    static constexpr unsigned min( ) { return 0; }
+    static constexpr unsigned max( ) { return ~unsigned(0); }
+    typedef unsigned result_type;
+    
+    unsigned x;
+    unsigned key;
+};
+
+\endcode
+
+# annexe : utiliser practrand pour tester un générateur
+
+practrand est une batterie de tests statistiques qui permet d'évaluer la qualité d'un générateur de nombre pseudo aléatoire, il est assez simple de l'utiliser. il suffit de récupérer l'archive de sources actuelle, cf https://pracrand.sourceforge.net/ , et de compiler l'utilitaire RNG_test :
+
+\code{.sh}
+> unzip practrand-xxx.zip -d practrand
+> cd practrand
+> g++ -Wall -o RNG_test tools/RNG_test.cpp src/*.cpp src/RNGs/*.cpp src/RNGs/other/*.cpp  -I include/ -O2
+\endcode
+
+la manière la plus simple d'utiliser RNG_test est d'écrire la séquence de nombres aléatoires à tester sur la sortie standard et d'utiliser un pipe vers RNG_test.
+on a besoin d'un programme de test pour générer les nombres aléatoires et les écrire sur la sortie standard, par exemple :
+\code
+#include <cstdio>
+#include <random>
+
+#include "rng.h"
+
+constexpr unsigned buffer_size= 512;
+
+int main() 
+{
+    std::random_device hwseed;
+    RNG32 rng( hwseed() );
+    
+    unsigned buffer[buffer_size];
+    while(true) 
+    {
+        for(unsigned k = 0; k < buffer_size; k++)
+            buffer[k]= rng();
+            
+        fwrite((void *) buffer, sizeof(buffer), 1, stdout);
+    }
+    
+    return 0;
+}
+\endcode
+
+et on peut tester la qualité du LCG de base : 
+\code{.sh}
+> g++ -Wall -o rng rng.cpp -O2
+> ./rng | ./RNG_test stdin32 -tlmin 10
+\endcode
+
+les résultats ne sont pas très rassurants :
+\code{.sh}
+RNG_test using PractRand version 0.95
+RNG = RNG_stdin32, seed = unknown
+test set = core, folding = standard (32 bit)
+
+rng=RNG_stdin32, seed=unknown
+length= 1 kilobyte (2^10 bytes), time= 0.0 seconds
+  no anomalies in 6 test result(s)
+
+rng=RNG_stdin32, seed=unknown
+length= 2 kilobytes (2^11 bytes), time= 0.1 seconds
+  Test Name                         Raw       Processed     Evaluation
+  DC6-9x1Bytes-1                    R=  +4.8  p = 0.032     unusual          
+  ...and 7 test result(s) without anomalies
+
+rng=RNG_stdin32, seed=unknown
+length= 4 kilobytes (2^12 bytes), time= 0.1 seconds
+  Test Name                         Raw       Processed     Evaluation
+  BCFN(2+0,13-9,T)                  R= +27.0  p =  2.6e-7   very suspicious  
+  DC6-9x1Bytes-1                    R= +11.8  p =  5.0e-5   suspicious       
+  [Low8/32]FPF-14+6/16:all          R=+234.0  p~=   9e-134    FAIL !!!!!     
+  [Low8/32]mod3n(5):(2,9-6)         R= +34.4  p =  2.4e-12    FAIL           
+  ...and 13 test result(s) without anomalies
+\endcode
+
+les LCG de la librairie standard ne font pas mieux, vérifiez !
+
+pour PCG32, il faudra être un peu plus patient :
+\code{.sh}
+RNG_test using PractRand version 0.95
+RNG = RNG_stdin32, seed = unknown
+test set = core, folding = standard (32 bit)
+
+rng=RNG_stdin32, seed=unknown
+length= 1 kilobyte (2^10 bytes), time= 0.0 seconds
+  no anomalies in 6 test result(s)
+
+rng=RNG_stdin32, seed=unknown
+length= 2 kilobytes (2^11 bytes), time= 0.1 seconds
+  no anomalies in 8 test result(s)
+
+rng=RNG_stdin32, seed=unknown
+length= 4 kilobytes (2^12 bytes), time= 0.1 seconds
+  no anomalies in 18 test result(s)
+...
+
+rng=RNG_stdin32, seed=unknown
+length= 16 megabytes (2^24 bytes), time= 10.5 seconds
+  no anomalies in 120 test result(s)
+...
+
+rng=RNG_stdin32, seed=unknown
+length= 4 gigabytes (2^32 bytes), time= 42.8 seconds
+  no anomalies in 216 test result(s)
+
+rng=RNG_stdin32, seed=unknown
+length= 8 gigabytes (2^33 bytes), time= 68.0 seconds
+  no anomalies in 230 test result(s)
+...
+
+\endcode
+
+# annexe : référence
+
+les différents générateurs sont disponibles dans gKit :
+	- rng.h regroupe les LCG de base : RNG0, RNG32, RNG64 mais avec la fonction `index(i)`,
+	- pcg.h regroupe la version classique PCG32 et la version compacte PCG32I,
+	- crng.h regroupe les versions 32 et 64 bits du générateur basé compteur / fonction de hachage, CRNG32 et CRNG64
+	- rand123.h regroupe les générateurs proposés dans ["Parallel random numbers: as easy as 1, 2, 3"](https://www.thesalmons.org/john/random123/) Salmon 2011. 
+	
+__remarque :__ ces codes sont repris / restructurés à partir des codes officiels. rand123.h propose des implementations très compactes et lisibles du code officiel. les tests statistiques laissent penser que je n'ai pas fait d'erreur grossière en manipulant le code, mais ce ne sont pas les implementations officielles.
+
+*/

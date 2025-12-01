@@ -1,0 +1,191 @@
+
+
+/*! \addtogroup mcrendu Monte Carlo et équation de rendu
+
+    on vient de voir dans \ref eqrendu que l'on a besoin d'estimer l'intégrale d'une fonction pour calculer la lumière réfléchie par un point de la scène. 
+et qu'une méthode assez proche de l'intégration par rectangles n'est pas tout à fait adaptée au problème... mais qu'il existe une autre 
+méthode : \ref mc. par contre, les exemples précédents d'intégration avec Monte Carlo n'etaient qu'en une seule dimension. 
+comment utiliser Monte Carlo pour intégrer l'équation de rendu ?
+
+c'est à dire comment utiliser ça :
+\f[
+\begin{eqnarray*}
+    I &= &\int f(x)\, dx\\
+    I &\approx &\frac{1}{N} \sum_i^N \frac{f(x_i)}{p(x_i)}
+\end{eqnarray*}
+\f]
+
+pour calculer ça : 
+\f[ 
+    L_r(p, \vec{o})= \int_{\Omega} \frac{k}{\pi} V(p, \vec{l}) L_i(p, \vec{l}) \cos \theta \, dl
+\f]
+
+la démarche est toujours la même, on part de l'intégration à calculer et on écrit l'estimateur :
+\f[
+\begin{eqnarray*}
+    L_r(p, \vec{o}) &= & \int_{\Omega} \frac{k}{\pi} V(p, \vec{l}) L_i(p, \vec{l}) \cos \theta \, dl\\
+              &\approx & \frac{1}{N} \sum_j^N \frac{k}{\pi} V(p, \vec{l_j}) L_i(p, \vec{l_j}) \cos \theta \frac{1}{p(\vec{l_j})}
+\end{eqnarray*}
+\f]
+
+mais on se retrouve avec le même problème : on vient de remplacer la variable de l'intégration par une variable aléatoire et il faut 
+définir sa densité de proba \f$ p( \vec{l} ) \f$ et savoir générer des directions en fonction de cette densité...
+
+sans rentrer dans les détails, l'idée est de changer de variable dans l'intégration sur l'hémisphère en utilisant les angles \f$ (\theta, \phi) \f$ 
+pour décrire une direction sur \f$ \Omega \f$, ce qui permet de faire apparaitre les 2 angles qui représentent une direction \f$ \vec{l} \f$ : 
+\f[
+\begin{eqnarray*}
+   & & \int_{\Omega} f(\vec{l}) \cos \theta \, dl\\
+&= & \int_{0}^{2\pi}\int_{0}^{\pi/2} f\left( \vec{l}(\theta, \phi ) \right) \cos \theta \sin \theta \, d\theta \, d\phi
+\end{eqnarray*}
+\f]
+
+ensuite, il faut construire les 2 densités de proba, 
+celles de \f$ \theta \f$ et \f$ \phi \f$, puis leurs fonctions de répartition et enfin les inverser pour générer une direction en utilisant 2 nombres 
+aléatoires uniformes \f$ u_1, u_2 \f$ compris entre 0 et 1. un exemple plus simple (en 1d) est présenté dans 
+\ref mc section "générer des points avec une densité de proba continue..."
+
+par exemple, on peut construire une direction uniforme \f$ \vec{v} \f$ sur \f$ \Omega \f$ avec :
+\f[
+\begin{eqnarray*}
+    p(\vec{v})&= & \frac{1}{2\pi}\\
+  \cos \theta &= & u_1\\
+         \phi &= & 2\pi \, u_2\\
+      \vec{v} &= & ( \cos \phi \sin \theta, \, \sin \phi \sin \theta, \, \cos \theta)\\
+    \mbox{avec }\sin \theta &= & \sqrt{1 - \cos \theta \cos \theta}
+\end{eqnarray*}
+\f]
+
+et voila, on peut calculer une image maintenant, avec \f$ N = 64 \f$ par exemple : 
+
+<center>
+    <table style="width=100%;border=0px">
+        <tr><td><IMG SRC="mcrendu_uniform-064.png" width="100%"> <td><IMG SRC="mcrendu_fibonacci-064.png" width="100%"></tr>
+    </table>
+</center>
+(à gauche l'intégration Monte Carlo, à droite l'intégration avec une spirale de Fibonacci)
+
+mais ce n'est pas très différent de ce que l'on peut obtenir avec une spirale de Fibonacci orientée différemment pour chaque pixel... alors pourquoi ?
+
+__quel est l'intérêt d'avoir fait tout ça ?__
+
+de la même manière que l'on a re-écrit l'équation de rendu sur les angles \f$ (\theta, \phi) \f$ pour générer des directions sur l'hemisphère, on va pouvoir
+écrire une transformation différente qui permet de "viser" directement les sources de lumières et de placer tous les points au bon endroit... au lieu d'espérer
+trouver des sources de lumières en choisissant aléatoirement des directions. c'est à dire au lieu d'intégrer ces fonctions :
+<center>
+    <table style="width=100%;border=0px">
+        <tr><td><IMG SRC="mcrendu_sources_uniform-064.png" width="100%"> <td><IMG SRC="mcrendu_sources_fibonacci-064.png" width="100%"></tr>
+    </table>
+</center>
+(c'est la même visualisation que dans \ref eqrendu, les sources de lumière sont en blanc dans la vignette en bas à gauche, les autres objets ne sont dessinés
+que pour rendre la vignette plus lisible)
+
+on va directement viser les sources de lumière : 
+<center>
+    <IMG SRC="mcrendu_sources-064.png" width="100%"> 
+</center>
+
+# reformuler le problème...
+
+le point de départ est le même :
+\f[ 
+    L_r(p, \vec{o})= L_e(p, \vec{o}) + \int_{\Omega} \frac{k}{\pi} V(p, \vec{l}) L_i(p, \vec{l}) \cos \theta \, dl
+\f]
+
+mais on va changer de variable d'intégration, pour écrire la même chose, en intégrant sur les points à la surface des objets :
+\f[ 
+    L_r(p, o)= L_e(p, o) + \int_{A} \frac{k}{\pi} V(p, q) L_i(p, q) \cos \theta_p \frac{\cos \theta_q}{||\vec{pq}||^2} \, dq
+\f]
+
+avec \f$ A \f$ l'aire de la surface des objets de la scène et le point \f$ q \f$ la nouvelle variable d'intégration. le changement de variable introduit également 
+un terme supplémentaire, qui est nécessaire pour garantir que l'on calcule toujours la même chose, quelquesoit la forme de l'intégrale, soit sur 
+des directions, soit sur des points...
+
+_pour les curieux :_ pourquoi \f$ dl= \sin \theta d\theta d\phi \f$ et pourquoi \f$ dl= \frac{\cos \theta_q}{||\vec{pq}||^2} dq\f$ ? un peu de lecture dans 
+<a href="https://www.pbr-book.org/3ed-2018/Color_and_Radiometry/Working_with_Radiometric_Integrals"> PBRT chapitre 5 : Working with Radiometric Integrals</a>.
+
+
+__et alors ?__
+connaissant un point \f$ q \f$ et sa matière, on peut maintenant utiliser le fait que certains points émettent de la lumière mais pas les autres... si \f$ q \f$ n'est 
+pas sur une source, on sait que \f$ L_i(p, q) = 0 \f$, ie le point \f$ p \f$ ne récoit pas de lumière de \f$ q \f$. en pratique, on vient de séparer les points de la scène, 
+ie le domaine d'intégration \f$ A \f$, en 2 parties : les points sur les sources \f$ S \f$ et les autres, \f$ A - S \f$. on peut écrire explicitement cette propriété :
+\f[ 
+\begin{eqnarray*}
+    L_r(p, o) &= & L_e(p, o) \\
+              &+ & \left[ \int_{A - S} \frac{k}{\pi} V(p, q) L_i(p, q) \cos \theta_p \frac{\cos \theta_q}{||\vec{pq}||^2} \, dq \right] = 0 \\
+              &+ & \int_{S} \frac{k}{\pi} V(p, q) L_i(p, q) \cos \theta_p \frac{\cos \theta_q}{||\vec{pq}||^2} \, dq\\
+\end{eqnarray*}
+\f]
+
+et comme \f$ L_i(p, q) = 0 \f$ pour tous les points \f$ q \f$ qui ne sont pas sur les sources, toute cette partie du domaine d'intégration est nulle et ne contribue pas 
+au résultat, il n'y a pas de raison de passer du temps à intégrer numériquement un résultat que l'on connait à l'avance (et qui est 0 en plus...)
+
+__ok, c'est peut etre interressant...__ mais il faut encore finir le calcul et pouvoir générer des points \f$ q \f$ aléatoirement sur les sources de lumière... 
+
+on commence par écrire l'estimateur Monte Carlo avec la densité de proba de la variable \f$ q \f$ :
+\f[
+\begin{eqnarray*}
+    L_r(p, o) &= & L_e(p, o) + \int_{S} \frac{k}{\pi} V(p, q) L_i(p, q) \cos \theta_p \frac{\cos \theta_q}{||\vec{pq}||^2} \, dq\\
+        &\approx & L_e(p, o) + \frac{1}{N} \sum_j^N \frac{k}{\pi} V(p, q_j) L_i(p, q_j) \cos \theta_p \frac{\cos \theta_{q_j}}{||\vec{pq_j}||^2} \, \frac{1}{p(q_j)}
+\end{eqnarray*}
+\f]
+
+on va commencer par un cas simple : on suppose qu'il n'y a qu'une source de lumière et que c'est un carré. quelle densité de proba peut-on utiliser ? par exemple, une densité
+uniforme, ie \f$ p(q)= \frac{1}{aire} \f$. on va utiliser 2 variables aléatoires, une pour choisir une position dans la longueur du carré, et une autre pour la hauteur, on utilise 2 fois le
+choix d'un point dans un intervalle (cf \ref mc), la densité de q est le produit des 2 : \f$ p(q) = \frac{1}{largeur}\frac{1}{hauteur} = \frac{1}{aire}\f$
+
+si on connait un point \f$ a \f$ et les 2 arètes qui définissent la source, on peut écrire directement :
+\code
+    Point a= {... };    // sommet de la source
+    Vector x= {... };   // aretes de la source
+    Vector y= {... };
+    
+    // connaissant u1 et u2 aleatoires entre 0 et 1
+    Point q= a + u1 * x + u2 * y;
+    float pdf= 1 / length(cross(x, y));
+\endcode
+
+__et ça marche ?__ 
+
+pour \f$ N = 4, 16 \f$ :
+<center>
+    <table style="width=100%;border=0px">
+        <tr><td><IMG SRC="mcrendu_source-004.png" width="100%"> <td><IMG SRC="mcrendu_source-016.png" width="100%"></tr>
+    </table>
+</center>
+
+c'est un poil mieux non ? pour comparer, les résultats précédents avec \f$ N = 64 \f$ ressemblaient à ça :
+<center>
+    <table style="width=100%;border=0px">
+        <tr><td><IMG SRC="mcrendu_uniform-064.png" width="100%"> <td><IMG SRC="mcrendu_fibonacci-064.png" width="100%"></tr>
+    </table>
+</center>
+
+même si les différentes étapes semblent bizarres et un peu compliquées, ie utiliser Monte Carlo, les densités de proba, leur inversion, la reformulation 
+du problème, etc. on arrive à un résultat nettement plus convaincant qu'avec la première intégration numérique... et c'est aussi beaucoup plus rapide à calculer !!
+
+# bilan
+
+_pourquoi utiliser des trucs aussi compliqués pour calculer une image ?_ tout simplement parce que ce sont les bons outils pour formuler le problème, ie le calcul que l'on veut
+faire et estimer un résultat correct. 
+
+_pourquoi une intégrale ?_ il faut demander aux physiciens / opticiens... mais le résultat n'est pas si surprenant lorsque l'on veut éclairer une 
+scène avec autre chose qu'un point ou une direction... 
+
+et _pourquoi Monte Carlo ?_ probablement parce que c'est la méthode la plus souple et la plus robuste pour calculer tout ça, 
+même s'il est nécessaire de faire beaucoup de calculs, dans certains cas, pour obtenir une image propre et sans défauts. l'industrie n'utilise plus que cette solution pour produire
+les films d'animation et les effets spéciaux. 
+par exemple : 
+    - Hyperyon / Disney : <a href= "https://www.yiningkarlli.com/projects/hyperiondesign/hyperiondesign.pdf"> "The Design and Evolution of Disney’s Hyperion Renderer"</a>,
+    - Renderman / Pixar : <a href="https://graphics.pixar.com/library/RendermanTog2018/paper.pdf"> "RenderMan: An Advanced Path Tracing Architecture for Movie Rendering"</a>.
+
+vous pouvez faire une soirée Toy story (par exemple) pour constater l'évolution de la qualité du rendu entre 1995 (Toy story 1) et 2010 (Toy Story 3) 
+qui sont produits avec les méthodes classiques (ie le pipeline REYES) et comparer aux solutions plus récentes : 2019 (Toy Story 4) et 2022 (Buzz Lightyear) qui utilisent du lancer de 
+rayons et de l'intégration Monte Carlo (ainsi que des modèles de matières réalistes de plus en plus détaillés)... 
+
+un peu de lecture sur les méthodes précédentes :
+    - REYES : un pipeline de fragmentation / rasterization, à peine plus général que celui utilisé par une carte graphique moderne,\n
+    cf <a href= "https://graphics.pixar.com/library/Reyes/paper.pdf"> "the Reyes image rendering architecture"</a>, Pixar, 1987,
+    - approximation de l'éclairage global : cf <a href="https://www.tabellion.org/et/paper11/OutOfCorePBGI.pdf"> "Coherent Out-of-Core Point-Based Global Illumination"</a>, Dreamworks, 2011.
+
+*/

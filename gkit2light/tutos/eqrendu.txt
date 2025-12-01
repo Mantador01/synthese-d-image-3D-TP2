@@ -1,0 +1,275 @@
+
+
+/*! \addtogroup eqrendu synthèse réaliste et intégration numérique : l'équation de rendu
+
+# synthèse réaliste ?
+
+au minimum, on souhaite dessiner des objets et les éclairer _correctement_. ce qui suppose que l'on sait dessiner les objets mais aussi déterminer lesquels sont éclairés, ou à l'ombre, et
+comment ils réfléchissent la lumière reçue vers l'observateur, ou la camera.
+
+il y a, en gros, 2 manières assez différentes de dessiner les objets, cf \ref intro3d et \ref intrort. Mais dans les 2 cas, on obtient finalement les 
+mêmes informations : quel point de quel objet est visible pour chaque pixel de l'image, la normale de la surface de l'objet pour ce point et la description
+de sa matière.
+
+## 1 source 
+
+on va commencer par un cas simple : une seule source qui émet de la lumière le long d'une seule direction, un peu comme le soleil.
+c'est la situation habituelle, cf \ref matiere : on a une camera, un point dans la scène, et une direction vers la source de lumière : 
+
+<center> <IMG SRC="source_direction.png" width="40%"> </center>
+
+__qu'est ce que l'on calcule ?__
+\f[ 
+    L_r(p, \vec{o})= \frac{k}{\pi} V(\vec{l}) L_i(p, \vec{l}) \cos \theta
+\f]
+
+ou de manière plus lisible, \f$ L_r(p, \vec{o}) \f$ la lumière réfléchie par p vers l'observateur dans la direction o se calcule comme la réflexion de la  
+lumière incidente \f$ L_i(p, \vec{l}) \f$  qui éclaire le point p depuis la direction l. \f$ V(p, \vec{l}) \f$ est égal à 1 si la source qui émet la lumière est 
+visible depuis p dans la direction l et 0 si ce n'est pas le cas. Le dernier terme, \f$ k / \pi \f$ représente une réflexion diffuse toute simple, cf le 
+modèle de Lambert dans \ref matiere.
+
+on peut écrire un code simplifié pour réaliser ce calcul :
+\code
+// on connait deja : 
+    Point p;
+    Vector n;
+    Material material;
+    Vector l;           // direction de la source
+    Color emission;     // lumiere emise par la source
+
+// lumiere reflechie par p
+    float V= scene.visible(p + epsilon*n, l);   // renvoie 1, s'il n'y a pas d'intersection dans la direction l
+    float cos_theta= std::max(0, dot(normalize(n), normalize(l)));
+    Color color= material.diffuse / pi * V * emission * cos_theta;
+\endcode
+
+et voila !
+
+<center> <IMG SRC="eqrendu_sun.png" width="60%"> </center> 
+
+c'est moche, mais c'est correct. 
+
+__pourquoi ?__
+habituellement, il y a de la lumière partout, ie cette situation n'est pas très naturelle, le ciel éclaire presque autant que le soleil.
+
+## un ciel / dome de directions
+
+comment éclairer les objets par un ciel ? assez intuitivement, on a envi de refaire le calcul avec plusieurs directions. plus précisement, il va 
+falloir _intégrer_ (ou sommer) toute la lumière qui éclaire le point quelque soit sa direction d'incidence. cette formulation s'appelle 
+l'équation du rendu :
+
+<center> <IMG SRC="source_omega.png" width="40%"> </center> 
+
+cette formulation de la synthèse d'images réaliste à été introduite en 1986 par J. Kajiya, cf <a href="https://dl.acm.org/doi/pdf/10.1145/15922.15902"> "The rendering equation"</a>.
+
+
+\f[ 
+    L_r(p, \vec{o})= \int_{\Omega} \frac{k}{\pi} V(\vec{l}) L_i(p, \vec{l}) \cos \theta dl
+\f]
+
+le symbole \f$ \Omega \f$ représente toutes les directions \f$ \vec{l} \f$  qui peuvent éclairer le point p.
+
+
+__c'est malin, comment faire le calcul maintenant ?__
+si on suppose qu'il n'y a pas d'ombres, ie \f$ V(p)= 1 \f$ pour toutes les directions de \f$ \Omega \f$, on peut quand même faire le calcul et 
+le résultat est plutot simple et facile à retenir :
+
+\f[
+\begin{eqnarray*}
+    L_r(p, \vec{o}) &= & \frac{k}{\pi} \int_{\Omega} L_i(p, \vec{l}) \cos \theta dl\\
+                    &= & \frac{k}{\pi} L_i(p, \vec{l}) \frac{1 + \cos \theta}{2}\\
+    \mbox{avec }\vec{l} &= & \mbox{Y (ou la direction vers le sommet du dome)}
+\end{eqnarray*}
+\f]
+
+__pour les curieux :__ les détails des calculs sont dans 
+    <a href="https://www.microsoft.com/en-us/research/wp-content/uploads/1996/03/arealights.pdf"> 
+    "Area Light Sources for Real-Time Graphics"</a>, 1996, J.Snyder
+
+<center> <IMG SRC="eqrendu_omega.png" width="60%"> </center> 
+
+## et pour de vrai ? (avec les ombres)
+
+comment estimer numériquement l'intégrale d'une fonction ? par exemple : 
+\f[ 
+    \int_a^b f(x) dx = ?
+\f]
+
+en 1d, on peut utiliser l'intégration par rectangles. l'idée est de découper le domaine d'intégration, un 
+intervalle \f$ [a .. b] \f$ en N segments, chaque segment mesure \f$ \frac{1}{N}(b - a) \f$ : 
+\f[ 
+\begin{eqnarray*}
+    \int_a^b f(x) dx &= & \frac{1}{N} \sum_i^N (b-a) f(x_i)\\
+       \mbox{et }x_i &= & a + \frac{1}{N}(b - a) \cdot i
+\end{eqnarray*}
+\f]
+
+en 2d, pour utiliser la même méthode, il faut découper le domaine d'intégration (un rectangle) en grille de \f$ N \f$ cases. mais on veut intégrer sur \f$ \Omega \f$,
+un dome / une hemisphère / un ensemble de directions... et construire une grille sur un ensemble de directions n'est pas très direct, ni très intuitif.
+
+mais bien sur, il y a une solution : on peut utiliser une spirale de Fibonacci qui permet de construire l'équivalent d'une grille sur \f$ \Omega \f$ :
+    cf <a href="https://ribardiere.pages.xlim.fr/articles/2013/CGF_SF.pdf"> 
+    "Spherical Fibonacci Point Sets for Illumination Integrals"</a>, 2013, R.Marques, C.Bouville, R.Ribardière, L.PSantos, K. Bouatouch.
+
+<center> <IMG SRC="fibo_mapping.png" width="50%"> </center> 
+
+pour construire la direction \f$ i \f$ sur \f$ N \f$ :
+\f[ 
+\begin{eqnarray*}
+    \cos \theta &= & 1 - \frac{2i + 1}{2N}\\
+           \phi &= & 2  \pi \left[ \frac{i}{\Phi} \right] \equiv 2  \pi \left( \frac{i}{\Phi} - \left\lfloor \frac{i}{\Phi} \right\rfloor \right)\\
+\mbox{avec }\Phi &= &\frac{(\sqrt 5 + 1)}{2}\\
+\mbox{avec }\sin \theta&= &\sqrt{1 - \cos^2 \theta}
+\end{eqnarray*}
+\f]
+
+il ne reste plus qu'à passer des angles \f$ (\theta, \phi) \f$ aux coordonnées \f$ (x, y, z) \f$ :
+\f[
+(x, y, z) = (\cos \phi \sin \theta, \sin \phi \sin \theta, \cos \theta)
+\f]
+
+ce qui se code sans trop de problèmes : 
+\code
+    float fract( const float v )  { return v - std::floor(v); }
+    
+    // renvoie la ieme direction parmi n
+    Vector fibonacci( const int i, const int N )
+    {
+        const float ratio= (std::sqrt(5) + 1) / 2;
+        
+        float phi= float(2 * M_PI) * fract(i / ratio);
+        float cos_theta= 1 - float(2*i +1) / float(N * 2);
+        float sin_theta= std::sqrt(1 - cos_theta*cos_theta);
+        
+        return Vector(std::cos(phi) * sin_theta, std::sin(phi) * sin_theta, cos_theta);
+    }
+\endcode
+
+
+on peut maintenant estimer l'intégrale !
+\f[ 
+\begin{eqnarray*}
+    L_r(p, \vec{o}) &= & \int_{\Omega} \frac{k}{\pi} V(\vec{l}) L_i(p, \vec{l}) \cos \theta dl\\
+                    &= & \frac{1}{N} \sum_i^N \frac{k}{\pi} V(\vec{f_i}) L_i(p, \vec{f_i}) \cos \theta\\
+    \mbox{avec }\vec{f_i} &= & \mbox{fibonacci(i, N)}
+\end{eqnarray*}
+\f]
+
+et voila ! 
+
+<center> <IMG SRC="eqrendu_fibonacci-256.png" width="60%"> </center> 
+
+avec un code assez direct : 
+\code
+// parametres p, n, material, etc.
+    { ... }
+    
+// lumiere reflechie par p
+    Color color;        // ou Black();
+    for(int i= 0; i < N; i++)
+    {
+        Vector f= fibonacci(i, N);                  // genere la ieme direction 
+        float V= scene.visible(p + epsilon*n, f);   // renvoie 1, s'il n'y a pas d'intersection
+        
+        // évalue la fonction integrée
+        float cos_theta= std::max(0, dot(normalize(n), normalize(f)));
+        color= color + material.diffuse / pi * V * emission * cos_theta;
+    }
+    color= color / float(N);
+\endcode
+
+## et alors ?
+c'est fini ? tout marche parfaitement ?
+
+_pas vraiment_, j'ai omis un détail important, quelle valeur utiliser pour \f$ N \f$ ? le nombre de directions utilisé pour _estimer_ l'intégrale... 
+l'impact sur le résultat est loin d'être négligeable... et sur le temps de calcul aussi, bien sur.
+
+voila quelques exemples avec \f$ N= 1, 4, 16, 64 \f$
+
+<center> 
+	<table style="width=100%;border=0px">
+	<tr><td><IMG SRC="eqrendu_fibonacci-001.png" width="100%"> <td><IMG SRC="eqrendu_fibonacci-004.png" width="100%"></tr>
+	<tr><td><IMG SRC="eqrendu_fibonacci-016.png" width="100%"> <td><IMG SRC="eqrendu_fibonacci-064.png" width="100%"> </tr>
+	</table>
+</center> 
+et  \f$ N= 256 \f$ :
+<center> <IMG SRC="eqrendu_fibonacci-256.png" width="60%"> </center> 
+
+
+__euh c'est toujours moche ?__
+oui, les directions de la spirale sont les mêmes pour tous les points. lorsqu'il n'y a pas assez de directions (moins de 256 dans cet exemple) 
+pour estimer _précisement_ l'intégrale, il y a des défauts dans les images... une superposition d'ombres un peu bizarre, dans ce cas. 
+mais on peut casser ces défauts en faisant tourner la spirale sur elle même, différemment pour chaque point. ca ne change pas le résultat, 
+mais au lieu d'obtenir une superposition un peu bizarre, on obtient du bruit à la place, ce qui est finalement moins génant. de plus, on pourra 
+filtrer ce bruit si nécessaire, alors que ce serait particulièrement difficile sinon.
+
+<center> 
+<table style="width=100%;border=0px">
+<tr><td><IMG SRC="eqrendu_rfibonacci-001.png" width="100%"> <td><IMG SRC="eqrendu_rfibonacci-004.png" width="100%"> 
+<tr><td><IMG SRC="eqrendu_rfibonacci-016.png" width="100%"> <td><IMG SRC="eqrendu_rfibonacci-064.png" width="100%"> 
+</table>
+</center> 
+et  \f$ N= 256 \f$ :
+<center> <IMG SRC="eqrendu_rfibonacci-256.png" width="60%"> </center> 
+
+
+## résumé
+
+on vient de voir _très_ rapidement 2 choses : comment formuler le problème, et une méthode numérique pour estimer le résultat.
+
+on peut considérer que sur ce type de scène éclairée par un ciel / toutes les directions d'une hemisphère, la solution proposée est correcte. mais
+bien sur, toutes les scènes ne sont pas en extérieur et éclairées par le ciel et le soleil. que se passe-t-il dans une pièce éclairée par une source au plafond ?
+
+voila quelques exemples de la fonction intégrée pour un point dans le même exemple. l'image représente une vue de la scène, un rayon, un point de calcul et la vignette
+en bas à gauche est une vue 'fisheye' des objets et des sources visibles par le point (les sources de lumières sont en blanc dans les vignettes)
+
+<center> 
+<table style="width=100%;border=0px">
+<tr>
+    <td><IMG SRC="eqrendu_scene-Le-01.png" width="100%"> 
+    <td><IMG SRC="eqrendu_scene-Le-02.png" width="100%"> 
+</table>
+<IMG SRC="eqrendu_scene-Le-03.png" width="100%"> 
+</center> 
+
+premier constat, il y a de la lumière partout (ou presque) ! c'est normal, le ciel éclaire la scène... 
+
+et dans une scène intérieure éclairée par une source au plafond :
+
+<center> 
+<table style="width=100%;border=0px">
+<tr>
+    <td><IMG SRC="eqrendu_cornell-Le-02.png" width="100%"> 
+    <td><IMG SRC="eqrendu_cornell-Le-05.png" width="100%"> 
+</table>
+<IMG SRC="eqrendu_cornell-Le-06.png" width="100%"> 
+</center> 
+
+il y a beaucoup moins de directions qui voient la source... il faut zoomer un peu dans les images, mais les petits points rouges représentent 64 directions de la spirale
+de Fibonacci. en regardant attentivement, on peut constater que la source se trouve souvent entre les directions de la spirale. pour un point plus proche, 
+la source apparaitra plus grande, ou plus petite pour un point plus loin, sur le sol par exemple.
+
+mais dans tous les cas, on peut s'attendre à des résultats assez surprenants ?!
+
+avec \f$ N= 1, 4, 16, 64 \f$
+<center> 
+	<table style="width=100%;border=0px">
+	<tr><td><IMG SRC="eqrendu_cornell_fibonacci-001.png" width="100%"> <td><IMG SRC="eqrendu_cornell_fibonacci-004.png" width="100%"> 
+	<tr><td><IMG SRC="eqrendu_cornell_fibonacci-016.png" width="100%"> <td><IMG SRC="eqrendu_cornell_fibonacci-064.png" width="100%"> 
+	</table>
+</center> 
+et  \f$ N= 256 \f$ :
+<center> <IMG SRC="eqrendu_cornell_fibonacci-256.png" width="60%"> </center> 
+
+et effectivement, même avec 256 directions, l'image reste pleine de défauts assez surprenants !
+
+(oui _bien sur_, on peut utiliser quelques milliers de directions et une spirale orientée différement pour chaque point de calcul, mais cette première méthode est 
+quand même assez peu adaptée au problème...)
+
+# bilan
+il va falloir être un peu plus malin pour calculer une image correcte (et en temps raisonnable), bien que cette scène intérieure soit particulièrement simple...
+
+la suite, comment utiliser les probas pour estimer l'équation de rendu de manière plus souple et plus robuste... cf \ref mc
+
+
+*/
