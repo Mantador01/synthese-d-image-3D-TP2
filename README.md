@@ -1,5 +1,5 @@
 Ce dépôt contient le projet du TP2.
-Le code source principal se trouve dans `tp.cpp` et les shaders sont situés dans `data/rungholt/`.
+Le code C++ se trouve dans `tp.cpp` et les shaders sont situés dans `data/rungholt/`.
 
 ## ⚠️ Important
 
