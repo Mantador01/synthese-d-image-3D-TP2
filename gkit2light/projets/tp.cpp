@@ -17,6 +17,47 @@
 #include "draw.h"
 #include "app.h"
 
+struct Box
+{
+    vec3 pmin;
+    vec3 pmax;
+    vec3 center;
+    vec3 extent;
+};
+
+void extract_planes(const Transform& m, std::vector<vec4>& planes)
+{
+    planes.resize(6);
+    const float* mat = m.data();
+
+    // Left, Right, Bottom, Top, Near, Far
+    planes[0] = vec4(mat[3]+mat[0], mat[7]+mat[4], mat[11]+mat[8], mat[15]+mat[12]);
+    planes[1] = vec4(mat[3]-mat[0], mat[7]-mat[4], mat[11]-mat[8], mat[15]-mat[12]);
+    planes[2] = vec4(mat[3]+mat[1], mat[7]+mat[5], mat[11]+mat[9], mat[15]+mat[13]);
+    planes[3] = vec4(mat[3]-mat[1], mat[7]-mat[5], mat[11]-mat[9], mat[15]-mat[13]);
+    planes[4] = vec4(mat[3]+mat[2], mat[7]+mat[6], mat[11]+mat[10], mat[15]+mat[14]);
+    planes[5] = vec4(mat[3]-mat[2], mat[7]-mat[6], mat[11]-mat[10], mat[15]-mat[14]);
+
+    for(int i=0; i<6; i++) {
+        float len = std::sqrt(planes[i].x*planes[i].x + planes[i].y*planes[i].y + planes[i].z*planes[i].z);
+        if(len > 0.0f) {
+            float invLen = 1.0f / len;
+            planes[i].x *= invLen; planes[i].y *= invLen; planes[i].z *= invLen; planes[i].w *= invLen;
+        }
+    }
+}
+
+bool is_visible(const Box& b, const std::vector<vec4>& planes)
+{
+    for(int i=0; i<6; i++)
+    {
+        const vec4& p = planes[i];
+        float d = p.x * b.center.x + p.y * b.center.y + p.z * b.center.z + p.w;
+        float r = std::abs(p.x) * b.extent.x + std::abs(p.y) * b.extent.y + std::abs(p.z) * b.extent.z;
+        if(d + r < 0) return false;
+    }
+    return true;
+}
 
 Mesh make_fullscreen_quad()
 {
@@ -78,6 +119,7 @@ public:
         m_repere = make_grid(20);
 
         m_scene = read_mesh("data/rungholt/rungholt.obj");
+        // m_scene = read_mesh("data/rungholt/house.obj");
         if(m_scene.vertex_count() == 0)
         {
             printf("erreur : impossible de charger rungholt.obj\n");
@@ -91,6 +133,7 @@ public:
         }
 
         m_texture = read_texture(0, "data/rungholt/rungholt-RGBA.png");
+        // m_texture = read_texture(0, "data/rungholt/house-RGBA.png", true);
         if(m_texture == 0)
         {
             printf("erreur : impossible de charger rungholt-RGBA.png\n");
@@ -101,6 +144,62 @@ public:
         m_scene.bounds(pmin, pmax);
 
         build_navigation_from_mesh(m_scene);
+
+        printf("Decoupage scene...\n");
+        Vector dim = Vector(pmin, pmax);
+        float cell_size = 20.0f; // ICI LA TAILLE SI JAMAIS ON VEUT REDUIRE
+        int nx = (int)(dim.x / cell_size) + 1;
+        
+        std::vector<unsigned int> triangle_ids;
+        triangle_ids.reserve(m_scene.triangle_count());
+
+        for(int i = 0; i < m_scene.triangle_count(); i++)
+        {
+            TriangleData tri = m_scene.triangle(i);
+            Point center = (Point(tri.a) + Point(tri.b) + Point(tri.c)) / 3.f;
+            int cx = (int)((center.x - pmin.x) / cell_size);
+            int cz = (int)((center.z - pmin.z) / cell_size);
+            if(cx < 0) cx = 0; if(cz < 0) cz = 0;
+            
+            unsigned int group_id = cx + cz * nx;
+            triangle_ids.push_back(group_id);
+        }
+
+        m_groups = m_scene.groups(triangle_ids);
+        
+        bool has_tex = m_scene.texcoord_buffer_size() > 0;
+        bool has_nor = m_scene.normal_buffer_size() > 0;
+        m_scene_vao = m_scene.create_buffers(has_tex, has_nor, false, false);
+
+        m_group_boxes.reserve(m_groups.size());
+        for(const auto& g : m_groups)
+        {
+            Point bmin(1e9, 1e9, 1e9), bmax(-1e9, -1e9, -1e9);
+            for(int k=0; k < g.n; k++) {
+                int tri_id = g.first + k;
+                if(tri_id >= m_scene.triangle_count()) continue;
+
+                TriangleData tri = m_scene.triangle(g.first + k);
+                bmin = min(bmin, Point(tri.a)); bmax = max(bmax, Point(tri.a));
+                bmin = min(bmin, Point(tri.b)); bmax = max(bmax, Point(tri.b));
+                bmin = min(bmin, Point(tri.c)); bmax = max(bmax, Point(tri.c));
+            }
+            Box b;
+            b.pmin = vec3(bmin); b.pmax = vec3(bmax);
+            b.center = vec3(
+                (b.pmin.x + b.pmax.x) * 0.5f,
+                (b.pmin.y + b.pmax.y) * 0.5f,
+                (b.pmin.z + b.pmax.z) * 0.5f
+            );
+            b.extent = vec3(
+                (b.pmax.x - b.pmin.x) * 0.5f,
+                (b.pmax.y - b.pmin.y) * 0.5f,
+                (b.pmax.z - b.pmin.z) * 0.5f
+            );
+            m_group_boxes.push_back(b);
+        }
+        printf("Scene decoupee en %zu blocs.\n", m_groups.size());
+
 
         // centre approx de la ville en XZ
         vec3 c(
@@ -123,8 +222,8 @@ public:
             m_groundY = pmin.y;
         }
 
-        m_camHeight = 150.0f; // hauteur des yeux au-dessus du sol avec 5.0f, mais la je laisse 150.0f pour avoir une vu global (pour les captures du rapport)
-        // m_camHeight = 5.0f;
+            m_camHeight = 5.0f; // hauteur des yeux au-dessus du sol avec 5.0f, mais la je laisse 150.0f pour avoir une vu global (pour les captures du rapport)
+        // m_camHeight = 150.0f; //hauteur des yeux au-dessus du sol avec 5.0f, mais la je laisse 150.0f pour avoir une vu global (pour les captures du rapport) 
         m_camPos    = Point(start_x, m_groundY + m_camHeight, start_z);
         m_camYaw    = 0.0f;
         m_camPitch  = 0.0f;
@@ -265,7 +364,38 @@ public:
         program_uniform(m_program_gbuffer, "mvMatrix",  mv);
         program_uniform(m_program_gbuffer, "mvpMatrix", mvp);
 
-        m_scene.draw(m_program_gbuffer,true,true,true,false,false);
+        // m_scene.draw(m_program_gbuffer,true,true,true,false,false);
+
+        std::vector<vec4> planes;
+        static std::vector<vec4> frozen_planes;
+        
+        // faut appuyer sur c pour freeze les plans du frustum (pour verif)
+        if(!key_state(SDLK_c)) {
+            extract_planes(mvp, planes);
+            frozen_planes = planes;
+        } else {
+            planes = frozen_planes;
+        }
+
+        std::vector<GLint> starts;
+        std::vector<GLsizei> counts;
+        int visible_triangles = 0;
+
+        for(size_t i=0; i < m_groups.size(); i++) {
+            if(is_visible(m_group_boxes[i], planes)) {
+                starts.push_back(m_groups[i].first * 3);
+                counts.push_back(m_groups[i].n * 3);
+                visible_triangles += m_groups[i].n;
+            }
+        }
+
+        static int frame = 0;
+        if(frame++ % 2 == 0) printf("CPU Culling: %d triangles visibles\n", visible_triangles);
+
+        glBindVertexArray(m_scene_vao);
+        if(!starts.empty()) {
+            glMultiDrawArrays(GL_TRIANGLES, starts.data(), counts.data(), (GLsizei)starts.size());
+        }
 
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
         glViewport(0, 0, window_width(), window_height());
@@ -502,6 +632,10 @@ protected:
     std::vector<PointLight> m_lights;
     int m_lightCount = 128;
     std::vector<Vector>     m_lightPosView;
+
+    std::vector<TriangleGroup> m_groups;
+    std::vector<Box> m_group_boxes;
+    GLuint m_scene_vao = 0;
 };
 
 
